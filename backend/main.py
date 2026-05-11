@@ -99,79 +99,88 @@ def fmt_num(v):
 # ─── 데이터 수집 (yfinance) ───────────────────────────────────────────────────
 
 async def fetch_stock_data(ticker: str) -> dict:
-    """yfinance에서 주가·재무·기술 데이터를 모두 수집."""
+    """yfinance로 데이터 수집. 실패 시 빈 구조 반환 (Claude 웹서치로 보완)."""
     def _sync():
-        # 한국 종목이면 .KS 접미사 추가
-        t_str = ticker + ".KS" if ticker.isdigit() else ticker
-
-        t = yf.Ticker(t_str)
-        info = t.info
-        hist = t.history(period="1y")
-
-        current = info.get("currentPrice") or info.get("regularMarketPrice") or 0
-        w52h = info.get("fiftyTwoWeekHigh") or 0
-        w52l = info.get("fiftyTwoWeekLow") or 0
-        ma50  = info.get("fiftyDayAverage")
-        ma200 = info.get("twoHundredDayAverage")
-
-        # 52주 레인지 내 위치 (0~100%)
-        rng = w52h - w52l
-        momentum_pct = round((current - w52l) / rng * 100, 1) if rng > 0 else 50
-
-        # 1개월 수익률
-        price_change_1m = 0.0
-        if len(hist) >= 20:
-            p1m = float(hist["Close"].iloc[-20])
-            price_change_1m = round((current - p1m) / p1m * 100, 2) if p1m else 0
-
-        # MA 신호
-        ma_signal = "골든크로스" if (ma50 and ma200 and ma50 > ma200) else (
-            "데드크로스" if (ma50 and ma200 and ma50 < ma200) else "중립"
-        )
-
-        return {
-            "ticker": ticker,
-            "ticker_yf": t_str,
-            "name": info.get("longName") or info.get("shortName", ticker),
-            "exchange": info.get("exchange", ""),
-            "sector": info.get("sector", ""),
-            "industry": info.get("industry", ""),
-            "currency": info.get("currency", "USD"),
-            # 가격
-            "current_price": current,
-            "market_cap": info.get("marketCap"),
-            "week52_high": w52h,
-            "week52_low": w52l,
-            "momentum_pct": momentum_pct,
-            "price_change_1m": price_change_1m,
-            "ma50": ma50,
-            "ma200": ma200,
-            "ma_signal": ma_signal,
-            "beta": info.get("beta"),
-            # 밸류에이션
-            "per": info.get("trailingPE"),
-            "per_forward": info.get("forwardPE"),
-            "pbr": info.get("priceToBook"),
-            "psr": info.get("priceToSalesTrailing12Months"),
-            "ev_ebitda": info.get("enterpriseToEbitda"),
-            # 재무
-            "revenue": info.get("totalRevenue"),
-            "revenue_growth": info.get("revenueGrowth"),
-            "gross_margin": info.get("grossMargins"),
-            "op_margin": info.get("operatingMargins"),
-            "net_margin": info.get("profitMargins"),
-            "roe": info.get("returnOnEquity"),
-            "roa": info.get("returnOnAssets"),
-            "debt_equity": info.get("debtToEquity"),
-            "current_ratio": info.get("currentRatio"),
-            "free_cashflow": info.get("freeCashflow"),
-            # 애널리스트 컨센서스
-            "analyst_target": info.get("targetMeanPrice"),
-            "analyst_low": info.get("targetLowPrice"),
-            "analyst_high": info.get("targetHighPrice"),
-            "analyst_recommendation": info.get("recommendationMean"),  # 1=강매수 5=강매도
-            "analyst_count": info.get("numberOfAnalystOpinions"),
+        base = {
+            "ticker": ticker, "ticker_yf": ticker, "name": ticker,
+            "exchange": "", "sector": "", "industry": "",
+            "currency": "KRW" if ticker.isdigit() else "USD",
+            "current_price": None, "market_cap": None,
+            "week52_high": None, "week52_low": None,
+            "momentum_pct": None, "price_change_1m": None,
+            "ma50": None, "ma200": None, "ma_signal": "N/A", "beta": None,
+            "per": None, "per_forward": None, "pbr": None,
+            "psr": None, "ev_ebitda": None,
+            "revenue": None, "revenue_growth": None,
+            "gross_margin": None, "op_margin": None, "net_margin": None,
+            "roe": None, "roa": None, "debt_equity": None,
+            "current_ratio": None, "free_cashflow": None,
+            "analyst_target": None, "analyst_low": None,
+            "analyst_high": None, "analyst_recommendation": None,
+            "analyst_count": None,
         }
+        try:
+            import requests as req_session
+            session = req_session.Session()
+            session.headers["User-Agent"] = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+            t_str = ticker + ".KS" if ticker.isdigit() else ticker
+            t = yf.Ticker(t_str, session=session)
+            info = t.info or {}
+            if not info.get("regularMarketPrice") and not info.get("currentPrice"):
+                raise ValueError("빈 응답")
+
+            hist = t.history(period="1y")
+            current = info.get("currentPrice") or info.get("regularMarketPrice") or 0
+            w52h = info.get("fiftyTwoWeekHigh") or 0
+            w52l = info.get("fiftyTwoWeekLow") or 0
+            rng = w52h - w52l
+            momentum_pct = round((current - w52l) / rng * 100, 1) if rng > 0 else 50
+            price_change_1m = 0.0
+            if len(hist) >= 20:
+                p1m = float(hist["Close"].iloc[-20])
+                price_change_1m = round((current - p1m) / p1m * 100, 2) if p1m else 0
+            ma50  = info.get("fiftyDayAverage")
+            ma200 = info.get("twoHundredDayAverage")
+            ma_signal = ("골든크로스" if ma50 and ma200 and ma50 > ma200
+                         else "데드크로스" if ma50 and ma200 and ma50 < ma200
+                         else "중립")
+            base.update({
+                "name": info.get("longName") or info.get("shortName", ticker),
+                "exchange": info.get("exchange", ""),
+                "sector": info.get("sector", ""),
+                "industry": info.get("industry", ""),
+                "currency": info.get("currency", base["currency"]),
+                "current_price": current, "market_cap": info.get("marketCap"),
+                "week52_high": w52h, "week52_low": w52l,
+                "momentum_pct": momentum_pct, "price_change_1m": price_change_1m,
+                "ma50": ma50, "ma200": ma200, "ma_signal": ma_signal,
+                "beta": info.get("beta"),
+                "per": info.get("trailingPE"), "per_forward": info.get("forwardPE"),
+                "pbr": info.get("priceToBook"),
+                "psr": info.get("priceToSalesTrailing12Months"),
+                "ev_ebitda": info.get("enterpriseToEbitda"),
+                "revenue": info.get("totalRevenue"),
+                "revenue_growth": info.get("revenueGrowth"),
+                "gross_margin": info.get("grossMargins"),
+                "op_margin": info.get("operatingMargins"),
+                "net_margin": info.get("profitMargins"),
+                "roe": info.get("returnOnEquity"), "roa": info.get("returnOnAssets"),
+                "debt_equity": info.get("debtToEquity"),
+                "current_ratio": info.get("currentRatio"),
+                "free_cashflow": info.get("freeCashflow"),
+                "analyst_target": info.get("targetMeanPrice"),
+                "analyst_low": info.get("targetLowPrice"),
+                "analyst_high": info.get("targetHighPrice"),
+                "analyst_recommendation": info.get("recommendationMean"),
+                "analyst_count": info.get("numberOfAnalystOpinions"),
+            })
+        except Exception as e:
+            print(f"yfinance 실패 ({ticker}): {e} → 웹서치로 대체")
+        return base
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _sync)
