@@ -37,7 +37,6 @@ async def call_claude(
     use_search: bool = False,
     max_tokens: int = 1000,
 ) -> str:
-    """Claude API 호출. tool_use 루프를 자동으로 처리."""
     messages = [{"role": "user", "content": user}]
     body: dict = {
         "model": MODEL,
@@ -54,26 +53,46 @@ async def call_claude(
         "anthropic-version": "2023-06-01",
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        for _ in range(8):
-            resp = await client.post(BASE_URL, json=body, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+    for retry in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                for _ in range(8):
+                    resp = await client.post(BASE_URL, json=body, headers=headers)
 
-            if data["stop_reason"] == "tool_use":
-                messages.append({"role": "assistant", "content": data["content"]})
-                tool_results = [
-                    {"type": "tool_result", "tool_use_id": b["id"], "content": ""}
-                    for b in data["content"]
-                    if b["type"] == "tool_use"
-                ]
-                messages.append({"role": "user", "content": tool_results})
-                body["messages"] = messages
+                    if resp.status_code == 429:
+                        wait = 30 * (retry + 1)
+                        print(f"Rate limit 429 — {wait}초 대기 후 재시도 ({retry+1}/3)")
+                        await asyncio.sleep(wait)
+                        break  # inner loop 탈출 → retry
+
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                    if data["stop_reason"] == "tool_use":
+                        messages.append({"role": "assistant", "content": data["content"]})
+                        tool_results = [
+                            {"type": "tool_result", "tool_use_id": b["id"], "content": ""}
+                            for b in data["content"]
+                            if b["type"] == "tool_use"
+                        ]
+                        messages.append({"role": "user", "content": tool_results})
+                        body["messages"] = messages
+                        continue
+
+                    return "\n".join(
+                        b["text"] for b in data["content"] if b["type"] == "text"
+                    )
+                else:
+                    continue  # inner for 정상 종료 시 retry 불필요
+                continue  # 429로 break한 경우 retry
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429 and retry < 2:
+                await asyncio.sleep(30 * (retry + 1))
                 continue
+            raise
 
-            return "\n".join(b["text"] for b in data["content"] if b["type"] == "text")
-
-    raise RuntimeError("tool_use 반복 한도 초과")
+    raise RuntimeError("재시도 한도(3회) 초과")
 
 
 def parse_json(text: str) -> dict:
@@ -478,16 +497,24 @@ async def analyze_stock(ticker: str):
             stock_data = await fetch_stock_data(ticker)
             yield evt("data_ready", data=stock_data)
 
-            # ② 5개 에이전트 병렬 실행
-            yield evt("progress", step="analysts", message="🔬 5개 전문 에이전트 병렬 분석 중...")
-            raw_results = await asyncio.gather(
-                fundamental_agent(ticker, stock_data),
-                valuation_agent(ticker, stock_data),
-                sentiment_agent(ticker, stock_data),
-                technical_agent(ticker, stock_data),
-                peer_agent(ticker, stock_data),
-                return_exceptions=True,
-            )
+            # ② 5개 에이전트 순차 실행 (rate limit 방지)
+            yield evt("progress", step="analysts", message="🔬 5개 전문 에이전트 순차 분석 중...")
+
+            agent_fns = [
+                fundamental_agent,
+                valuation_agent,
+                sentiment_agent,
+                technical_agent,
+                peer_agent,
+            ]
+            raw_results = []
+            for fn in agent_fns:
+                try:
+                    r = await fn(ticker, stock_data)
+                except Exception as e:
+                    r = {"agent": "unknown", "score": 50, "summary": str(e), "error": True}
+                raw_results.append(r)
+                await asyncio.sleep(3)  # 에이전트 사이 3초 간격
 
             analyst_reports: list[dict] = []
             for res in raw_results:
