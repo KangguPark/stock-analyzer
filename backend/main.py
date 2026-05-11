@@ -514,7 +514,7 @@ async def analyze_stock(ticker: str):
                 except Exception as e:
                     r = {"agent": "unknown", "score": 50, "summary": str(e), "error": True}
                 raw_results.append(r)
-                await asyncio.sleep(3)  # 에이전트 사이 3초 간격
+                await asyncio.sleep(8)
 
             analyst_reports: list[dict] = []
             for res in raw_results:
@@ -526,19 +526,21 @@ async def analyze_stock(ticker: str):
                     analyst_reports.append(res)
                     yield evt("agent_done", agent=res.get("agent", ""), report=res)
 
-            # ③ Bull & Bear 병렬 토론
+            # ③ Bull & Bear 토론
             yield evt("progress", step="debate", message="⚔️ Bull vs Bear 토론 중...")
-            bull, bear = await asyncio.gather(
-                bull_researcher(ticker, analyst_reports),
-                bear_researcher(ticker, analyst_reports),
-            )
+            bull = await bull_researcher(ticker, analyst_reports)
             yield evt("agent_done", agent="bull", report=bull)
+            await asyncio.sleep(8)
+
+            bear = await bear_researcher(ticker, analyst_reports)
             yield evt("agent_done", agent="bear", report=bear)
+            await asyncio.sleep(8)
 
             # ④ 리스크 매니저
             yield evt("progress", step="risk", message="🛡️ 리스크 매니저 검토 중...")
             risk = await risk_manager_agent(ticker, bull, bear)
             yield evt("agent_done", agent="risk", report=risk)
+            await asyncio.sleep(8)
 
             # ⑤ 최종 결정
             yield evt("progress", step="final", message="🎯 최종 투자 의견 종합 중...")
